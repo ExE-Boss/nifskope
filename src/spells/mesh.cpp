@@ -1,10 +1,21 @@
 #include "mesh.h"
 #include "gl/gltools.h"
+#include "../nifmodel.h"
 
+#include <QClipboard>
 #include <QDialog>
+#include <QFileDialog>
 #include <QGridLayout>
+#include <QGuiApplication>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QJsonValue>
 
 #include <cfloat>
+#include <iostream>
+#include <sstream>
+#include <string>
 
 
 // Brief description is deliberately not autolinked to class Spell
@@ -757,3 +768,264 @@ public:
 };
 
 REGISTER_SPELL( spUpdateAllBounds )
+
+class spCopyVertexData final : public Spell {
+public:
+	QString name() const override final { return Spell::tr( "Copy Vertex Data" ); }
+	QString page() const override final { return Spell::tr( "Mesh" ); }
+
+	bool isApplicable(const NifModel * nif, const QModelIndex & index) override {
+		return nif->isNiBlock( index, "NiSkinPartition" )/* && nif->getIndex( index, "Vertex Data" )*/;
+
+/*		if ( nif->isArray( index ) ) {
+			//Check if array is of fixed size
+			NifItem * item = static_cast<NifItem *>( index.internalPointer() );
+			bool static1 = true;
+			bool static2 = true;
+
+			if ( item->arr1().isEmpty() == false ) {
+				item->arr1().toInt( &static1 );
+			}
+
+			if ( item->arr2().isEmpty() == false ) {
+				item->arr2().toInt( &static2 );
+			}
+
+			//Leave this commented out until a way for static arrays to be initialized to the right size is created.
+			//if ( static1 && static2 )
+			//{
+			//	//Neither arr1 or arr2 is a variable name
+			//	return false;
+			//}
+
+			//One of arr1 or arr2 is a variable name so the array is dynamic
+			return item->name() == "Vertex Data";
+		}
+
+		return false;*/
+	}
+
+	QModelIndex cast(NifModel * nif, const QModelIndex & index) override {
+		std::printf("NiSkinPartition: %d %d \n", nif->getBlockNumber(index), index.isValid());
+		std::cout.flush();
+
+		auto iVertData = nif->getIndex( index, "Vertex Data" );
+		std::printf("Vertex data: %d \n", iVertData.isValid());
+		std::cout.flush();
+
+		auto vertexFlags = nif->get<quint16>( index, "VF" );
+		bool hasNormals = vertexFlags & 0x80;
+
+		std::stringstream res;
+		std::printf("Begin parsing vertex data \n");
+		std::cout.flush();
+		auto numVerts = nif->get<int>( index, "Data Size" ) / nif->get<int>( index, "Vertex Size" );
+		std::printf("Vertex count: %d \n", numVerts);
+		std::cout.flush();
+		res << "[";
+		for ( int i = 0; i < numVerts; i++ ) {
+//			if (i >= 1000) break;
+			if (i > 0) res << ",\n";
+
+			auto idx = nif->index( i, 0, iVertData );
+
+			Vector3	vert	= nif->get<Vector3>( idx, "Vertex" );
+			Vector2	uv	= nif->get<HalfVector2>( idx, "UV" );
+			Vector3	norm	= nif->get<ByteVector3>( idx, "Normal" );
+
+			res << "{";
+			res << "\"vertex\":[" << vert[0] << ",\t" << vert[1] << ",\t" << vert[2] << "],\t";
+			if (hasNormals) {
+				res << "\"normal\":[" << norm[0] << ",\t" << norm[1] << ",\t" << norm[2] << "],\t";
+			}
+			res << "\"uv\":[" << uv[0] << ",\t" << uv[1] << "]\t";
+			res << "}";
+		}
+		res << "]";
+
+		std::printf("Exporting serialized vertex data to clipboard. \n");
+		std::cout.flush();
+
+		auto clipboard = QGuiApplication::clipboard();
+		clipboard->setText(res.str().data());
+
+		return index;
+	}
+};
+
+REGISTER_SPELL( spCopyVertexData )
+
+class spPasteVertexData final : public Spell {
+public:
+	QString name() const override final { return Spell::tr( "Paste Vertex Data" ); }
+	QString page() const override final { return Spell::tr( "Mesh" ); }
+
+	bool isApplicable(const NifModel * nif, const QModelIndex & index) override {
+		// TODO: Check the clipboard for the correct MIME-type.
+		return nif->isNiBlock( index, "NiSkinPartition" )/* && nif->getIndex( index, "Vertex Data" )*/;
+	}
+
+	QModelIndex cast(NifModel * nif, const QModelIndex & index) override {
+		std::printf("NiSkinPartition: %d %d \n", nif->getBlockNumber(index), index.isValid());
+		std::cout.flush();
+
+		auto iVertData = nif->getIndex( index, "Vertex Data" );
+		std::printf("Vertex data: %d \n", iVertData.isValid());
+		std::cout.flush();
+
+		auto vertexFlags = nif->get<quint16>( index, "VF" );
+		bool hasNormals = vertexFlags & 0x80;
+
+		std::stringstream res;
+		auto numVerts = nif->get<int>( index, "Data Size" ) / nif->get<int>( index, "Vertex Size" );
+		std::printf("Vertex count: %d \n", numVerts);
+		std::printf("Begin de-serializing vertex data from clipboard \n");
+		std::cout.flush();
+
+		QVector<bool> used;
+		QVector<Vector3> verts;
+		QVector<Vector2> coords;
+		QVector<Vector3> norms;
+
+		auto clipboard = QGuiApplication::clipboard();
+		auto vertexJson = clipboard->text();
+		auto doc = QJsonDocument::fromJson(vertexJson.toUtf8());
+
+		if (!doc.isArray()) {
+			std::cerr << "Error reading JSON data from clipboard\n";
+			std::cerr.flush();
+			return index;
+		}
+
+		auto array = doc.array();
+		auto arySize = array.size();
+		std::printf("De-serialized vertex count: %d \n", arySize);
+		if (arySize != numVerts) {
+			std::cerr << "The imported array size is not equal to the vertex data size\n";
+			std::cerr << "Was: " << arySize << ", Expected: " << numVerts << "\n";
+			std::cerr.flush();
+			return index;
+		}
+
+		for ( int i = 0; i < arySize; i++ ) {
+			auto vertexObject = array[i].toObject();
+
+			auto vertData = vertexObject["vertex"].toArray();
+			verts += Vector3((float)vertData[0].toDouble(), (float)vertData[1].toDouble(), (float)vertData[2].toDouble());
+
+			auto uvData = vertexObject["uv"].toArray();
+			coords += HalfVector2((float)uvData[0].toDouble(), (float)uvData[1].toDouble());
+
+			used += false;
+
+			if (hasNormals && vertexObject["normal"].isArray()) {
+				// TODO: Deserialize normals
+			}
+		}
+
+		QVector<int> missedVertices;
+		QVector<Vector3> missedVerticesV3;
+
+		int modified = 0;
+		int modifiedPrev;
+		for (int i = 0; i < numVerts; i++) {
+			modifiedPrev = modified;
+			auto idx = nif->index( i, 0, iVertData );
+
+			Vector3	vert	= nif->get<Vector3>( idx, "Vertex" );
+			Vector2	uv	= nif->get<HalfVector2>( idx, "UV" );
+
+			std::printf("%4d Vertex: %f %f %f\n", i, vert[0], vert[1], vert[2]);
+			for ( int j = 0; j < arySize; j++ ) {
+				if (used[j]) continue;
+				// UV tolerance: 0.000001
+				Vector2 uv2 = coords[j];
+				float diffX = uv[0] - uv2[0];
+				float diffY = uv[1] - uv2[1];
+//				std::printf("%4d  UV: %f %f | %4d  UV2: %f %f\n", i, uv[0], uv[1], j, uv2[0], uv2[1]);
+				if (diffX > -0.00001 && diffX < 0.00001 &&
+					diffY > -0.00001 && diffY < 0.00001) {
+					Vector3 vert2 = verts[j];
+					std::printf("%4d   Match found (%4d %f %f %f)\n", i, j, vert2[0], vert2[1], vert2[2]);
+					vert[0] = vert2[0];
+					vert[1] = vert2[1];
+					vert[2] = vert2[2];
+					used[j] = true;
+					modified++;
+					break;
+				}
+			}
+			if (modified == modifiedPrev) {
+				std::printf("%4d   Match not found, vertex not modified!\n", i);
+				missedVertices += i;
+				missedVerticesV3 += vert;
+			}
+			std::cout.flush();
+
+			nif->set<Vector3>( idx, "Vertex", vert );
+			nif->set<HalfVector2>( idx, "UV", uv );
+		}
+
+		int missed = numVerts - modified;
+		std::printf("Modified %d out of %d vertices.\n", modified, numVerts);
+		std::cout.flush();
+		if (missed > 0) {
+			std::cerr << "Couldn’t paste " << missed << " vertices, needs manual fixing.\n";
+			std::cerr << "Missed vertices:\n";
+			for (int i = 0; i < missedVertices.size(); i++) {
+				Vector3	vert = missedVerticesV3[i];
+				std::cerr << missedVertices[i] << " (" << vert[0] << ", " << vert[1] << ", " << vert[2] << ")\n";
+			}
+			std::cerr.flush();
+		}
+
+		return index;
+	}
+};
+
+REGISTER_SPELL( spPasteVertexData )
+
+/*class spFixBodyMesh final : public Spell {
+public:
+	QString name() const override final { return Spell::tr( "Fix Body Mesh" ); };
+	QString page() const override final { return Spell::tr( "Mesh" ); };
+
+	bool isApplicable(const NifModel * nif, const QModelIndex & index) override {
+		return nif->isNiBlock( index, "BSTriShape" ); // TODO: Make this better
+	}
+
+	QModelIndex cast(NifModel * nif, const QModelIndex & index) override {
+		std::printf("Nif index: %d %d \n", nif->getBlockNumber(index), index.isValid());
+		QVector<Vector3> verts;
+		QVector<Vector3> norms;
+		QVector<Vector2> texco;
+
+		auto bsDismemberSkinInstance = nif->getIndex( index, "BSDismemberSkinInstance" );
+		std::printf("BSDismemberSkinInstance: %d \n", bsDismemberSkinInstance.isValid());
+		auto skinPartition = nif->getIndex( index, "NiSkinPartition" ); //
+		std::printf("NiSkinPartition: %d \n", skinPartition.isValid());
+		auto vertData = nif->getIndex( index, "Vertex Data" );
+		std::printf("Vertex data: %d \n", vertData.isValid());
+		std::cout.flush();
+
+/ *		QString otherNifPath = QFileDialog::getOpenFileName( Q_NULLPTR, tr("Open File"), nif->getFileInfo().dir().path(), "Model (.nif)" );
+		bool result = nif->loadFromFile(otherNifPath);
+		if (!result) {
+			// The other model didn’t load.
+			return index;
+		}
+
+		QPersistentModelIndex iShape = index;
+		QModelIndex iData;
+
+		iData = nif->getBlock( nif->getLink( iShape, "Data" ) );
+
+		QVector<Vector3> verts;
+		QVector<Vector3> norms;
+		QVector<Vector2> texco;* /
+
+		return index;
+	}
+};
+
+REGISTER_SPELL( spFixBodyMesh )*/
